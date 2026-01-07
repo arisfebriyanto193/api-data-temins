@@ -1024,7 +1024,7 @@ func main() {
 	http.HandleFunc("/api/get-data", getSensorData)
 	http.HandleFunc("/api/export/excel-multi", exportExcelMultiSensor)
 
-	port := ":8080"
+	port := ":8089"
 	log.Printf("🚀 Server running on http://localhost%s", port)
 	log.Fatal(http.ListenAndServe(port, nil))
 }
