@@ -1014,11 +1014,7 @@ func authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-func exportExcelMultiSensor(w http.ResponseWriter, r *http.Request) {
-	// Placeholder untuk fungsi export excel yang ada di kode asli
-	// Silakan implementasikan atau biarkan seperti ini jika belum diperlukan
-	w.WriteHeader(http.StatusNotImplemented)
-}
+
 
 func main() {
 	initDB()
