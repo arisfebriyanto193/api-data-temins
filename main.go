@@ -1118,14 +1118,6 @@ func handleMultiDeviceLatest(w http.ResponseWriter, deviceIDs string, tzQuery, t
 	})
 }
 
-func exportExcelMultiSensor(w http.ResponseWriter, r *http.Request) {
-	// Implementasi fungsi export Excel jika diperlukan
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(Response{
-		Status:  false,
-		Message: "Fitur export Excel belum diimplementasikan",
-	})
-}
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
