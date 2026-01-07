@@ -24,6 +24,15 @@ type SensorData struct {
 	RecordedAt     string  `json:"recorded_at"`
 }
 
+type AggregatedData struct {
+	DeviceUniqueID string  `json:"device_unique_id"`
+	ParameterName  string  `json:"parameter_name"`
+	Value          float64 `json:"value"`
+	Mode           string  `json:"mode"`
+	FromTime       string  `json:"from_time"`
+	ToTime         string  `json:"to_time"`
+}
+
 type Response struct {
 	Status    bool        `json:"status"`
 	Filter    string      `json:"filter"`
@@ -136,7 +145,7 @@ func getSensorData(w http.ResponseWriter, r *http.Request) {
 	tanggal := q.Get("tanggal")
 	valueMode := q.Get("value")
 	zonaWaktu := q.Get("zonawaktu")
-
+	
 	// PARSE LIMIT
 	limitStr := q.Get("limit")
 	limit := 0
@@ -361,15 +370,6 @@ func handleAllParameters(w http.ResponseWriter, deviceID string, limit int, tzQu
 		data = append(data, s)
 	}
 
-	// Jika pakai limit, data sudah DESC (terbaru). Jika ingin kronologis, reverse di sini.
-	// Namun biasanya untuk "All Param" DESC sudah oke. 
-	// (Opsional: balik array jika ingin konsisten ASC)
-	if limit > 0 {
-		for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
-			data[i], data[j] = data[j], data[i]
-		}
-	}
-
 	respond(w, Response{
 		Status:    true,
 		Filter:    "all_parameters",
@@ -480,16 +480,11 @@ func handleAggregatedValueMode(w http.ResponseWriter, deviceID, jenis, periode, 
 	var args []interface{}
 	var filter string
 
-	// Tentukan Sort Direction: DESC jika ada limit (ambil terbaru), ASC jika tidak.
-	sortDir := "ASC"
-	if limit > 0 {
-		sortDir = "DESC"
-	}
-
 	switch periode {
 	case "hari":
 		if tanggal != "" {
-			query = fmt.Sprintf(`
+			// Untuk tanggal tertentu
+			baseQuery := fmt.Sprintf(`
 				SELECT MIN(id) AS id, device_unique_id, parameter_name,
 				       ROUND((%s)::numeric, 2) AS value,
 				       TO_CHAR(DATE_TRUNC('hour', %s), 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
@@ -499,11 +494,22 @@ func handleAggregatedValueMode(w http.ResponseWriter, deviceID, jenis, periode, 
 				  AND recorded_at >= $3::date
 				  AND recorded_at < ($3::date + INTERVAL '1 day')
 				GROUP BY device_unique_id, parameter_name, DATE_TRUNC('hour', %s)
-				ORDER BY DATE_TRUNC('hour', %s) %s
-			`, aggFunc, tzQuery, tzQuery, tzQuery, tzQuery, sortDir)
-			args = []interface{}{deviceID, jenis, tanggal}
+				ORDER BY DATE_TRUNC('hour', %s) DESC
+			`, aggFunc, tzQuery, tzQuery, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf(`
+					WITH ranked_data AS (%s)
+					SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $4
+				`, baseQuery)
+				args = []interface{}{deviceID, jenis, tanggal, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis, tanggal}
+			}
 		} else {
-			query = fmt.Sprintf(`
+			// 24 jam terakhir
+			baseQuery := fmt.Sprintf(`
 				SELECT MIN(id) AS id, device_unique_id, parameter_name,
 				       ROUND((%s)::numeric, 2) AS value,
 				       TO_CHAR(DATE_TRUNC('hour', %s), 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
@@ -512,14 +518,24 @@ func handleAggregatedValueMode(w http.ResponseWriter, deviceID, jenis, periode, 
 				  AND parameter_name = $2
 				  AND recorded_at >= NOW() - INTERVAL '24 HOURS'
 				GROUP BY device_unique_id, parameter_name, DATE_TRUNC('hour', %s)
-				ORDER BY DATE_TRUNC('hour', %s) %s
-			`, aggFunc, tzQuery, tzQuery, tzQuery, tzQuery, sortDir)
-			args = []interface{}{deviceID, jenis}
+				ORDER BY DATE_TRUNC('hour', %s) DESC
+			`, aggFunc, tzQuery, tzQuery, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf(`
+					WITH ranked_data AS (%s)
+					SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $3
+				`, baseQuery)
+				args = []interface{}{deviceID, jenis, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis}
+			}
 		}
 		filter = "hari"
 
 	case "minggu_ini":
-		query = fmt.Sprintf(`
+		baseQuery := fmt.Sprintf(`
 			SELECT MIN(id) AS id, device_unique_id, parameter_name,
 			       ROUND((%s)::numeric, 2) AS value,
 			       TO_CHAR(DATE(%s), 'YYYY-MM-DD') AS recorded_at
@@ -528,15 +544,25 @@ func handleAggregatedValueMode(w http.ResponseWriter, deviceID, jenis, periode, 
 			  AND parameter_name = $2
 			  AND recorded_at >= CURRENT_DATE - INTERVAL '6 DAYS'
 			GROUP BY device_unique_id, parameter_name, DATE(%s)
-			ORDER BY DATE(%s) %s
-		`, aggFunc, tzQuery, tzQuery, tzQuery, tzQuery, sortDir)
-		args = []interface{}{deviceID, jenis}
+			ORDER BY DATE(%s) DESC
+		`, aggFunc, tzQuery, tzQuery, tzQuery)
+		
+		if limit > 0 {
+			query = fmt.Sprintf(`
+				WITH ranked_data AS (%s)
+				SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $3
+			`, baseQuery)
+			args = []interface{}{deviceID, jenis, limit}
+		} else {
+			query = baseQuery
+			args = []interface{}{deviceID, jenis}
+		}
 		filter = "minggu_ini"
 
 	case "bulan":
 		if bulan != "" {
 			month, year := parseMonth(bulan)
-			query = fmt.Sprintf(`
+			baseQuery := fmt.Sprintf(`
 				SELECT MIN(id) AS id, device_unique_id, parameter_name,
 				       ROUND((%s)::numeric, 2) AS value,
 				       TO_CHAR(DATE(%s), 'YYYY-MM-DD') AS recorded_at
@@ -546,11 +572,21 @@ func handleAggregatedValueMode(w http.ResponseWriter, deviceID, jenis, periode, 
 				  AND EXTRACT(YEAR FROM recorded_at) = $3
 				  AND EXTRACT(MONTH FROM recorded_at) = $4
 				GROUP BY device_unique_id, parameter_name, DATE(%s)
-				ORDER BY DATE(%s) %s
-			`, aggFunc, tzQuery, tzQuery, tzQuery, tzQuery, sortDir)
-			args = []interface{}{deviceID, jenis, year, month}
+				ORDER BY DATE(%s) DESC
+			`, aggFunc, tzQuery, tzQuery, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf(`
+					WITH ranked_data AS (%s)
+					SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $5
+				`, baseQuery)
+				args = []interface{}{deviceID, jenis, year, month, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis, year, month}
+			}
 		} else {
-			query = fmt.Sprintf(`
+			baseQuery := fmt.Sprintf(`
 				SELECT MIN(id) AS id, device_unique_id, parameter_name,
 				       ROUND((%s)::numeric, 2) AS value,
 				       TO_CHAR(DATE(%s), 'YYYY-MM-DD') AS recorded_at
@@ -559,9 +595,19 @@ func handleAggregatedValueMode(w http.ResponseWriter, deviceID, jenis, periode, 
 				  AND parameter_name = $2
 				  AND recorded_at >= CURRENT_DATE - INTERVAL '29 DAYS'
 				GROUP BY device_unique_id, parameter_name, DATE(%s)
-				ORDER BY DATE(%s) %s
-			`, aggFunc, tzQuery, tzQuery, tzQuery, tzQuery, sortDir)
-			args = []interface{}{deviceID, jenis}
+				ORDER BY DATE(%s) DESC
+			`, aggFunc, tzQuery, tzQuery, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf(`
+					WITH ranked_data AS (%s)
+					SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $3
+				`, baseQuery)
+				args = []interface{}{deviceID, jenis, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis}
+			}
 		}
 		filter = "bulan"
 
@@ -569,9 +615,6 @@ func handleAggregatedValueMode(w http.ResponseWriter, deviceID, jenis, periode, 
 		respondError(w, "periode tidak valid untuk value mode", http.StatusBadRequest)
 		return
 	}
-
-	// Apply LIMIT jika ada
-	query = appendLimit(query, limit)
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -589,11 +632,9 @@ func handleAggregatedValueMode(w http.ResponseWriter, deviceID, jenis, periode, 
 		data = append(data, s)
 	}
 
-	// REVERSE ARRAY jika menggunakan LIMIT (agar kembali ASC)
-	if limit > 0 {
-		for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
-			data[i], data[j] = data[j], data[i]
-		}
+	// Balik urutan data untuk grafik
+	for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
+		data[i], data[j] = data[j], data[i]
 	}
 
 	respond(w, Response{
@@ -612,23 +653,18 @@ func handleAggregatedValueMode(w http.ResponseWriter, deviceID, jenis, periode, 
 func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, valueMode string, limit int, tzQuery, tzLabel string) {
 	var query string
 
-	// Tentukan arah sort.
-	sortDir := "ASC"
-	if limit > 0 {
-		sortDir = "DESC"
-	}
-
 	// 1. Jika valueMode ada (high/low/avg) DAN mode BUKAN ringkas
+	// Maka ambil 1 data agregat untuk seharian penuh
 	if valueMode != "" && mode != "ringkas" {
 		var aggFunc string
-		var aggSortDir string
+		var sortDir string // Untuk high/low bisa pakai order, tapi lebih aman pakai MAX/MIN
 		switch valueMode {
 		case "high":
 			aggFunc = "MAX(value)"
-			aggSortDir = "DESC"
+			sortDir = "DESC"
 		case "low":
 			aggFunc = "MIN(value)"
-			aggSortDir = "ASC"
+			sortDir = "ASC"
 		case "avg":
 			aggFunc = "AVG(value)"
 		default:
@@ -636,6 +672,8 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 			return
 		}
 
+		// Jika AVG, id mungkin tidak relevan, tapi kita ambil dummy min(id)
+		// Jika High/Low, kita ingin row sebenarnya.
 		if valueMode == "avg" {
 			query = fmt.Sprintf(`
 				SELECT 0 AS id, device_unique_id, parameter_name,
@@ -649,6 +687,7 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 				GROUP BY device_unique_id, parameter_name
 			`, aggFunc)
 		} else {
+			// Untuk High/Low, ambil row yang memiliki nilai tersebut
 			query = fmt.Sprintf(`
 				SELECT id, device_unique_id, parameter_name, value,
 				       TO_CHAR(%s, 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
@@ -659,9 +698,10 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 				  AND recorded_at < ($3::date + INTERVAL '1 day')
 				ORDER BY value %s
 				LIMIT 1
-			`, tzQuery, aggSortDir)
+			`, tzQuery, sortDir)
 		}
 		
+		// Eksekusi khusus untuk single value ini
 		rows, err := db.Query(query, deviceID, jenis, tanggal)
 		if err != nil {
 			respondError(w, err.Error(), http.StatusInternalServerError)
@@ -681,7 +721,7 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 		respond(w, Response{
 			Status:   true,
 			Filter:   "tanggal",
-			Mode:     "single_aggregate",
+			Mode:     "single_aggregate", // Mode khusus single value
 			Timezone: tzLabel,
 			Total:    len(data),
 			Data:     data,
@@ -705,7 +745,8 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 			return
 		}
 
-		query = fmt.Sprintf(`
+		// Query dengan DESC untuk mengambil data terbaru, lalu kita balik
+		baseQuery := fmt.Sprintf(`
 			SELECT MIN(id) AS id, device_unique_id, parameter_name,
 			       ROUND((%s)::numeric, 2) AS value,
 			       TO_CHAR(DATE_TRUNC('hour', %s), 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
@@ -715,10 +756,20 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 			  AND recorded_at >= $3::date
 			  AND recorded_at < ($3::date + INTERVAL '1 day')
 			GROUP BY device_unique_id, parameter_name, DATE_TRUNC('hour', %s)
-			ORDER BY DATE_TRUNC('hour', %s) %s
-		`, aggFunc, tzQuery, tzQuery, tzQuery, tzQuery, sortDir)
+			ORDER BY DATE_TRUNC('hour', %s) DESC
+		`, aggFunc, tzQuery, tzQuery, tzQuery)
+		
+		if limit > 0 {
+			query = fmt.Sprintf(`
+				WITH ranked_data AS (%s)
+				SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $4
+			`, baseQuery)
+		} else {
+			query = baseQuery
+		}
 	} else if mode == "ringkas" {
-		query = fmt.Sprintf(`
+		// Ringkas tanpa value mode (default avg)
+		baseQuery := fmt.Sprintf(`
 			SELECT MIN(id) AS id, device_unique_id, parameter_name,
 			       ROUND(AVG(value)::numeric, 2) AS value,
 			       TO_CHAR(DATE_TRUNC('hour', %s), 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
@@ -728,11 +779,21 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 			  AND recorded_at >= $3::date
 			  AND recorded_at < ($3::date + INTERVAL '1 day')
 			GROUP BY device_unique_id, parameter_name, DATE_TRUNC('hour', %s)
-			ORDER BY DATE_TRUNC('hour', %s) %s
-		`, tzQuery, tzQuery, tzQuery, tzQuery, sortDir)
+			ORDER BY DATE_TRUNC('hour', %s) DESC
+		`, tzQuery, tzQuery, tzQuery)
+		
+		if limit > 0 {
+			query = fmt.Sprintf(`
+				WITH ranked_data AS (%s)
+				SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $4
+			`, baseQuery)
+		} else {
+			query = baseQuery
+		}
 	} else {
 		// RAW DATA
-		query = fmt.Sprintf(`
+		// Data terbaru dengan DESC
+		baseQuery := fmt.Sprintf(`
 			SELECT id, device_unique_id, parameter_name, value,
 			       TO_CHAR(%s, 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
 			FROM sensor_logs
@@ -740,14 +801,28 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 			  AND parameter_name = $2
 			  AND recorded_at >= $3::date
 			  AND recorded_at < ($3::date + INTERVAL '1 day')
-			ORDER BY recorded_at %s
-		`, tzQuery, sortDir)
+			ORDER BY recorded_at DESC
+		`, tzQuery)
+		
+		if limit > 0 {
+			query = fmt.Sprintf("%s LIMIT $4", baseQuery)
+		} else {
+			query = baseQuery
+		}
 	}
 
-	// Apply Limit
-	query = appendLimit(query, limit)
-
-	rows, err := db.Query(query, deviceID, jenis, tanggal)
+	// Eksekusi query
+	var rows *sql.Rows
+	var err error
+	
+	if limit > 0 && (mode == "ringkas" || (valueMode != "" && mode == "ringkas")) {
+		rows, err = db.Query(query, deviceID, jenis, tanggal, limit)
+	} else if limit > 0 && mode != "ringkas" {
+		rows, err = db.Query(query, deviceID, jenis, tanggal, limit)
+	} else {
+		rows, err = db.Query(query, deviceID, jenis, tanggal)
+	}
+	
 	if err != nil {
 		respondError(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -763,8 +838,8 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 		data = append(data, s)
 	}
 
-	// REVERSE ARRAY jika menggunakan LIMIT (agar kembali ASC)
-	if limit > 0 {
+	// Balik urutan data untuk konsistensi (dari lama ke baru)
+	if mode == "ringkas" || (valueMode != "" && mode == "ringkas") {
 		for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
 			data[i], data[j] = data[j], data[i]
 		}
@@ -786,23 +861,16 @@ func handlePeriodeByDate(w http.ResponseWriter, deviceID, jenis, tanggal, mode, 
 	respond(w, resp)
 }
 
-// Handler: Periode - Support Limit & Reverse
+// Handler: Periode - Support Limit (DIPERBAIKI UNTUK RINGKAS)
 func handlePeriode(w http.ResponseWriter, deviceID, jenis, periode, mode, tahun, bulan string, limit int, tzQuery, tzLabel string) {
 	var query string
 	var args []interface{}
 
-	// Tentukan arah sort.
-	// Jika ada limit -> DESC (ambil terbaru), nanti direverse.
-	// Jika tidak -> ASC (kronologis standard).
-	sortDirection := "ASC"
-	if limit > 0 {
-		sortDirection = "DESC"
-	}
-
 	switch periode {
 	case "hari":
 		if mode == "ringkas" {
-			query = fmt.Sprintf(`
+			// Data terbaru dengan DESC, lalu kita ambil limit, lalu balik
+			baseQuery := fmt.Sprintf(`
 				SELECT MIN(id) AS id, device_unique_id, parameter_name,
 				       ROUND(AVG(value)::numeric, 2) AS value,
 				       TO_CHAR(DATE_TRUNC('hour', %s), 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
@@ -811,24 +879,43 @@ func handlePeriode(w http.ResponseWriter, deviceID, jenis, periode, mode, tahun,
 				  AND parameter_name = $2
 				  AND recorded_at >= NOW() - INTERVAL '24 HOURS'
 				GROUP BY device_unique_id, parameter_name, DATE_TRUNC('hour', %s)
-				ORDER BY DATE_TRUNC('hour', %s) %s
-			`, tzQuery, tzQuery, tzQuery, tzQuery, sortDirection)
+				ORDER BY DATE_TRUNC('hour', %s) DESC
+			`, tzQuery, tzQuery, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf(`
+					WITH ranked_data AS (%s)
+					SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $3
+				`, baseQuery)
+				args = []interface{}{deviceID, jenis, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis}
+			}
 		} else {
-			query = fmt.Sprintf(`
+			// RAW DATA - Data terbaru dengan DESC
+			baseQuery := fmt.Sprintf(`
 				SELECT id, device_unique_id, parameter_name, value,
 				       TO_CHAR(%s, 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
 				FROM sensor_logs
 				WHERE device_unique_id = $1
 				  AND parameter_name = $2
 				  AND recorded_at >= NOW() - INTERVAL '24 HOURS'
-				ORDER BY recorded_at %s
-			`, tzQuery, sortDirection)
+				ORDER BY recorded_at DESC
+			`, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf("%s LIMIT $3", baseQuery)
+				args = []interface{}{deviceID, jenis, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis}
+			}
 		}
-		args = []interface{}{deviceID, jenis}
 
 	case "minggu_ini":
 		if mode == "ringkas" {
-			query = fmt.Sprintf(`
+			baseQuery := fmt.Sprintf(`
 				SELECT MIN(id) AS id, device_unique_id, parameter_name,
 				       ROUND(AVG(value)::numeric, 2) AS value,
 				       TO_CHAR(DATE(%s), 'YYYY-MM-DD') AS recorded_at
@@ -837,20 +924,38 @@ func handlePeriode(w http.ResponseWriter, deviceID, jenis, periode, mode, tahun,
 				  AND parameter_name = $2
 				  AND recorded_at >= CURRENT_DATE - INTERVAL '6 DAYS'
 				GROUP BY device_unique_id, parameter_name, DATE(%s)
-				ORDER BY DATE(%s) %s
-			`, tzQuery, tzQuery, tzQuery, tzQuery, sortDirection)
+				ORDER BY DATE(%s) DESC
+			`, tzQuery, tzQuery, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf(`
+					WITH ranked_data AS (%s)
+					SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $3
+				`, baseQuery)
+				args = []interface{}{deviceID, jenis, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis}
+			}
 		} else {
-			query = fmt.Sprintf(`
+			baseQuery := fmt.Sprintf(`
 				SELECT id, device_unique_id, parameter_name, value,
 				       TO_CHAR(%s, 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
 				FROM sensor_logs
 				WHERE device_unique_id = $1
 				  AND parameter_name = $2
 				  AND recorded_at >= NOW() - INTERVAL '7 DAYS'
-				ORDER BY recorded_at %s
-			`, tzQuery, sortDirection)
+				ORDER BY recorded_at DESC
+			`, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf("%s LIMIT $3", baseQuery)
+				args = []interface{}{deviceID, jenis, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis}
+			}
 		}
-		args = []interface{}{deviceID, jenis}
 
 	case "bulan":
 		if bulan != "" {
@@ -862,7 +967,7 @@ func handlePeriode(w http.ResponseWriter, deviceID, jenis, periode, mode, tahun,
 		}
 
 		if mode == "ringkas" {
-			query = fmt.Sprintf(`
+			baseQuery := fmt.Sprintf(`
 				SELECT MIN(id) AS id, device_unique_id, parameter_name,
 				       ROUND(AVG(value)::numeric, 2) AS value,
 				       TO_CHAR(DATE(%s), 'YYYY-MM-DD') AS recorded_at
@@ -872,10 +977,21 @@ func handlePeriode(w http.ResponseWriter, deviceID, jenis, periode, mode, tahun,
 				  AND EXTRACT(YEAR FROM recorded_at) = $3
 				  AND EXTRACT(MONTH FROM recorded_at) = $4
 				GROUP BY device_unique_id, parameter_name, DATE(%s)
-				ORDER BY DATE(%s) %s
-			`, tzQuery, tzQuery, tzQuery, tzQuery, sortDirection)
+				ORDER BY DATE(%s) DESC
+			`, tzQuery, tzQuery, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf(`
+					WITH ranked_data AS (%s)
+					SELECT * FROM ranked_data ORDER BY recorded_at DESC LIMIT $5
+				`, baseQuery)
+				args = []interface{}{deviceID, jenis, tahun, bulan, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis, tahun, bulan}
+			}
 		} else {
-			query = fmt.Sprintf(`
+			baseQuery := fmt.Sprintf(`
 				SELECT id, device_unique_id, parameter_name, value,
 				       TO_CHAR(%s, 'YYYY-MM-DD HH24:MI:SS') AS recorded_at
 				FROM sensor_logs
@@ -883,18 +999,22 @@ func handlePeriode(w http.ResponseWriter, deviceID, jenis, periode, mode, tahun,
 				  AND parameter_name = $2
 				  AND EXTRACT(YEAR FROM recorded_at) = $3
 				  AND EXTRACT(MONTH FROM recorded_at) = $4
-				ORDER BY recorded_at %s
-			`, tzQuery, sortDirection)
+				ORDER BY recorded_at DESC
+			`, tzQuery)
+			
+			if limit > 0 {
+				query = fmt.Sprintf("%s LIMIT $5", baseQuery)
+				args = []interface{}{deviceID, jenis, tahun, bulan, limit}
+			} else {
+				query = baseQuery
+				args = []interface{}{deviceID, jenis, tahun, bulan}
+			}
 		}
-		args = []interface{}{deviceID, jenis, tahun, bulan}
 
 	default:
 		respondError(w, "Periode tidak valid", http.StatusBadRequest)
 		return
 	}
-
-	// Apply LIMIT
-	query = appendLimit(query, limit)
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
@@ -912,9 +1032,8 @@ func handlePeriode(w http.ResponseWriter, deviceID, jenis, periode, mode, tahun,
 		data = append(data, s)
 	}
 
-	// REVERSE ARRAY jika menggunakan LIMIT (agar kembali ASC)
-	// Karena kita query DESC untuk mendapatkan yang terbaru, tapi user ingin lihatnya urut jam (ASC).
-	if limit > 0 {
+	// Balik urutan data untuk mode ringkas agar dari lama ke baru
+	if mode == "ringkas" {
 		for i, j := 0, len(data)-1; i < j; i, j = i+1, j-1 {
 			data[i], data[j] = data[j], data[i]
 		}
@@ -999,6 +1118,15 @@ func handleMultiDeviceLatest(w http.ResponseWriter, deviceIDs string, tzQuery, t
 	})
 }
 
+func exportExcelMultiSensor(w http.ResponseWriter, r *http.Request) {
+	// Implementasi fungsi export Excel jika diperlukan
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(Response{
+		Status:  false,
+		Message: "Fitur export Excel belum diimplementasikan",
+	})
+}
+
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -1036,7 +1164,6 @@ func authMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-
 
 func main() {
 	initDB()
