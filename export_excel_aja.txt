@@ -1,0 +1,227 @@
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/lib/pq"
+	"github.com/xuri/excelize/v2"
+)
+
+// ===============================
+// PARSE SENSOR META
+// format: su:Suhu Udara (°C),ku:Kelembapan (%)
+// ===============================
+func parseSensorMeta(meta string) map[string]string {
+	result := map[string]string{}
+	if meta == "" {
+		return result
+	}
+	items := strings.Split(meta, ",")
+	for _, item := range items {
+		parts := strings.SplitN(item, ":", 2)
+		if len(parts) == 2 {
+			result[parts[0]] = parts[1]
+		}
+	}
+	return result
+}
+
+// ===============================
+// KONVERSI ZONA WAKTU
+// ===============================
+func convertTimezone(t time.Time, zonaWaktu string) time.Time {
+	// Data di database sudah dalam WIB
+	// WIB = UTC+7
+	// WITA = UTC+8 (WIB + 1 jam)
+	// WIT = UTC+9 (WIB + 2 jam)
+	
+	switch strings.ToLower(zonaWaktu) {
+	case "wita":
+		// Tambah 1 jam dari WIB
+		return t.Add(1 * time.Hour)
+	case "wit":
+		// Tambah 2 jam dari WIB
+		return t.Add(2 * time.Hour)
+	case "wib":
+		fallthrough
+	default:
+		// Tidak perlu konversi, sudah WIB
+		return t
+	}
+}
+
+// ===============================
+// GET ZONA WAKTU LABEL
+// ===============================
+func getZonaWaktuLabel(zonaWaktu string) string {
+	switch strings.ToLower(zonaWaktu) {
+	case "wita":
+		return "WITA"
+	case "wit":
+		return "WIT"
+	case "wib":
+		fallthrough
+	default:
+		return "WIB"
+	}
+}
+
+// ===============================
+// EXPORT EXCEL MULTI SENSOR
+// ===============================
+func exportExcelMultiSensor(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	deviceID := q.Get("device_id")
+	bulan := q.Get("bulan")
+	tahun := q.Get("tahun")
+	sensorParam := q.Get("sensors")
+	sensorMetaParam := q.Get("sensor_meta")
+	zonaWaktu := q.Get("zonawaktu")
+
+	// Default zona waktu adalah WIB jika tidak diisi
+	if zonaWaktu == "" {
+		zonaWaktu = "wib"
+	}
+
+	// Validasi zona waktu
+	zonaWaktuLower := strings.ToLower(zonaWaktu)
+	if zonaWaktuLower != "wib" && zonaWaktuLower != "wita" && zonaWaktuLower != "wit" {
+		http.Error(w, "zonawaktu harus wib, wita, atau wit", http.StatusBadRequest)
+		return
+	}
+
+	if deviceID == "" || bulan == "" || tahun == "" || sensorParam == "" {
+		http.Error(w, "device_id, bulan, tahun, sensors wajib diisi", http.StatusBadRequest)
+		return
+	}
+
+	sensors := strings.Split(sensorParam, ",")
+	sensorMeta := parseSensorMeta(sensorMetaParam)
+
+	// ===============================
+	// RANGE WAKTU BULAN
+	// ===============================
+	start, err := time.Parse("2006-01-02", fmt.Sprintf("%s-%s-01", tahun, bulan))
+	if err != nil {
+		http.Error(w, "format bulan/tahun salah", http.StatusBadRequest)
+		return
+	}
+	end := start.AddDate(0, 1, 0)
+
+	// ===============================
+	// QUERY DATABASE
+	// ===============================
+	rows, err := db.Query(`
+		SELECT
+			recorded_at  AS waktu,
+			parameter_name,
+			value
+		FROM sensor_logs
+		WHERE device_unique_id = $1
+		  AND parameter_name = ANY($2)
+		  AND recorded_at >= $3
+		  AND recorded_at <  $4
+		ORDER BY waktu ASC
+	`, deviceID, pq.Array(sensors), start, end)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	// ===============================
+	// PIVOT DATA (WAKTU -> SENSOR)
+	// ===============================
+	type TimeData struct {
+		Time   time.Time
+		Values map[string]float64
+	}
+
+	dataMap := map[string]*TimeData{}
+	var timeKeys []string
+
+	for rows.Next() {
+		var t time.Time
+		var name string
+		var val float64
+		if err := rows.Scan(&t, &name, &val); err != nil {
+			continue
+		}
+
+		// Konversi waktu sesuai zona waktu yang diminta
+		convertedTime := convertTimezone(t, zonaWaktu)
+		key := convertedTime.Format("2006-01-02 15:04:05")
+
+		if _, ok := dataMap[key]; !ok {
+			dataMap[key] = &TimeData{
+				Time:   convertedTime,
+				Values: map[string]float64{},
+			}
+			timeKeys = append(timeKeys, key)
+		}
+		dataMap[key].Values[name] = val
+	}
+
+	// ===============================
+	// SORT BERDASARKAN WAKTU
+	// ===============================
+	sort.Slice(timeKeys, func(i, j int) bool {
+		return dataMap[timeKeys[i]].Time.Before(dataMap[timeKeys[j]].Time)
+	})
+
+	// ===============================
+	// BUAT EXCEL
+	// ===============================
+	f := excelize.NewFile()
+	sheet := "Data Sensor"
+	f.SetSheetName("Sheet1", sheet)
+
+	// ===== HEADER =====
+	headers := []interface{}{"No"}
+	for _, s := range sensors {
+		if label, ok := sensorMeta[s]; ok {
+			headers = append(headers, label)
+		} else {
+			headers = append(headers, strings.ToUpper(s))
+		}
+	}
+	// Tambahkan label zona waktu pada header Waktu
+	zonaLabel := getZonaWaktuLabel(zonaWaktu)
+	headers = append(headers, fmt.Sprintf("Waktu (%s)", zonaLabel))
+	f.SetSheetRow(sheet, "A1", &headers)
+
+	// ===== DATA (SUDAH TERURUT) =====
+	rowNum := 2
+	for no, timeKey := range timeKeys {
+		values := dataMap[timeKey].Values
+
+		rowData := []interface{}{no + 1}
+		for _, s := range sensors {
+			if v, ok := values[s]; ok {
+				rowData = append(rowData, v)
+			} else {
+				rowData = append(rowData, "")
+			}
+		}
+		rowData = append(rowData, timeKey)
+
+		cell, _ := excelize.CoordinatesToCellName(1, rowNum)
+		f.SetSheetRow(sheet, cell, &rowData)
+		rowNum++
+	}
+
+	// ===============================
+	// RESPONSE DOWNLOAD
+	// ===============================
+	zonaLabel = getZonaWaktuLabel(zonaWaktu)
+	filename := fmt.Sprintf("Report_AllSensors_%s_%s_%s.xlsx", bulan, tahun, zonaLabel)
+	w.Header().Set("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filename+`"`)
+	if err := f.Write(w); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+	}
+}
