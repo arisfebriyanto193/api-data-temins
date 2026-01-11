@@ -52,7 +52,8 @@ var db *sql.DB
 
 // Database connection
 func initDB() {
-	connStr := "host=localhost port=5432 user=postgres password=example dbname=temins sslmode=disable"
+connStr := "host=localhost port=5432 user=postgres password=example dbname=temins sslmode=disable application_name=api-data"
+
 	var err error
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
