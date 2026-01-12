@@ -1162,6 +1162,20 @@ func main() {
 	initDB()
 	defer db.Close()
 
+
+
+//INI PAKAI TOKEN
+// http.Handle(
+// 	"/api/get-data",
+// 	corsMiddleware(
+// 		authMiddleware(
+// 			http.HandlerFunc(getSensorData),
+// 		),
+// 	),
+// )
+
+
+
 	// INI TANPA TOKEN
 	http.HandleFunc("/api/get-data", getSensorData)
 	http.HandleFunc("/api/export/excel-multi", exportExcelMultiSensor)
