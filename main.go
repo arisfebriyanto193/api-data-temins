@@ -1165,19 +1165,19 @@ func main() {
 
 
 //INI PAKAI TOKEN
-// http.Handle(
-// 	"/api/get-data",
-// 	corsMiddleware(
-// 		authMiddleware(
-// 			http.HandlerFunc(getSensorData),
-// 		),
-// 	),
-// )
+http.Handle(
+	"/api/get-data",
+	corsMiddleware(
+		authMiddleware(
+			http.HandlerFunc(getSensorData),
+		),
+	),
+)
 
 
 
 	// INI TANPA TOKEN
-	http.HandleFunc("/api/get-data", getSensorData)
+//	http.HandleFunc("/api/get-data", getSensorData)
 	http.HandleFunc("/api/export/excel-multi", exportExcelMultiSensor)
 
 	port := ":8089"
